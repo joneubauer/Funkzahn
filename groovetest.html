@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Groove Lab Diagnose</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #111; color: #fff; padding: 20px; }
+  h1 { font-size: 20px; color: #FF6B00; }
+  button { background: #FF6B00; color: #000; border: none; padding: 16px 24px; font-size: 16px; font-weight: 700;
+    border-radius: 8px; margin: 8px 4px; display: block; width: 100%; max-width: 360px; }
+  #log { text-align: left; background: #1a1a1a; border-radius: 8px; padding: 14px; margin-top: 20px;
+    font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 55vh; overflow-y: auto; }
+  .ok { color: #4ade80; } .err { color: #f87171; font-weight: bold; } .info { color: #FF6B00; } .warn { color: #fbbf24; }
+</style>
+</head>
+<body>
+<h1>🔍 Groove Lab Diagnose</h1>
+<p style="font-size:13px;color:#999;">Exakter Code aus deiner echten Website, isoliert.</p>
+
+<button onclick="testStep1()">1️⃣ Audio-Engine initialisieren</button>
+<button onclick="testStep2()">2️⃣ playDrum(0) — KICK testen</button>
+<button onclick="testStep3()">3️⃣ playBassNote() testen</button>
+<button onclick="testStep4()">4️⃣ Sequenz wie im echten Beat</button>
+
+<div id="log">Bereit für Test.</div>
+
+<script>
+window.onerror = function(msg, url, line, col, error) {
+  addLog('🔴 GLOBALER FEHLER: ' + msg + ' (Zeile ' + line + ':' + col + ')', 'err');
+  return false;
+};
+var log = document.getElementById('log');
+function addLog(msg, cls) {
+  var line = document.createElement('div');
+  line.textContent = msg;
+  if (cls) line.className = cls;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+// ═══════ AUDIO ENGINE (robust, single context for iOS) ═══════
+let audioCtx = null;
+let masterGain = null;
+let audioReady = false;
+
+function initAudio() {
+  if (audioCtx) return audioCtx;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.6;
+    masterGain.connect(audioCtx.destination);
+  } catch (e) {
+    console.warn('Web Audio nicht verfügbar', e);
+    return null;
+  }
+  return audioCtx;
+}
+
+function getCtx() {
+  if (!audioCtx) initAudio();
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  return audioCtx;
+}
+
+// Unlock audio on ANY first user gesture (critical for iOS Safari)
+function unlockAudio() {
+  const ctx = getCtx();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume();
+  if (!audioReady) {
+    // play a one-sample silent buffer to fully unlock iOS audio
+    try {
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+      audioReady = true;
+    } catch(e) {}
+  }
+}
+['touchend','touchstart','mousedown','click','keydown'].forEach(evt => {
+  document.addEventListener(evt, unlockAudio, { passive: true });
+});
+
+// Helper: play a single tone with envelope (connects to masterGain)
+function playTone(freq, startTime, duration, type, peakVol, filtered) {
+  const ctx = audioCtx;
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type || 'sawtooth';
+  osc.frequency.setValueAtTime(freq, startTime);
+  if (filtered) {
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(2600, startTime);
+    filter.frequency.exponentialRampToValueAtTime(700, startTime + duration);
+    filter.Q.value = 4;
+    osc.connect(filter); filter.connect(gain);
+  } else {
+    osc.connect(gain);
+  }
+  gain.connect(masterGain);
+  const v = peakVol || 0.3;
+  gain.gain.setValueAtTime(0.001, startTime);
+  gain.gain.linearRampToValueAtTime(v, startTime + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration * 0.95);
+  osc.start(startTime);
+  osc.stop(startTime + duration + 0.02);
+}
+
+// ═══════ MEMBER RIFFS ═══════
+const riffs = {
+  sax:    { type: 'sawtooth', notes: [415,466,560,466,415,370,415,560], dur: 0.13, swing: true },
+  vocal:  { type: 'sine',     notes: [392,466,523,466,392,349], dur: 0.16, swing: true },
+  vocal2: { type: 'sine',     notes: [523,622,698,622,523,466], dur: 0.16, swing: true },
+  guitar: { type: 'square',   notes: [330,330,392,330,440,392,330], dur: 0.11, swing: true, filtered: true },
+  bass:   { type: 'sawtooth', notes: [82,82,110,82,98,82,73,82], dur: 0.15, swing: true, filtered: true },
+  trumpet:{ type: 'sawtooth', notes: [523,587,698,587,523,466,523], dur: 0.14, swing: true },
+  drums:  { type: 'drums' },
+  keys:   { type: 'square',   notes: [523,466,415,466,523,622,523,466], dur: 0.13, swing: true, filtered: true },
+  fx:     { type: 'sine',     notes: [880,587,880,1175,880,587], dur: 0.11, swing: true },
+};
+
+function playMember(i) {
+  const m = members[i];
+  const ctx = getCtx();
+  if (!ctx) { showToast('🔇 Audio wird vom Browser blockiert'); return; }
+  if (ctx.state === 'suspended') ctx.resume();
+  const riff = riffs[m.riff] || riffs.sax;
+  document.querySelectorAll('.member-card').forEach(c => c.classList.remove('playing'));
+  const card = document.querySelectorAll('.member-card')[i];
+  if (card) card.classList.add('playing');
+  showToast(`${m.name} – ${m.role} 🎵`);
+
+  if (riff.type === 'drums') {
+    const pattern = [0,2,1,2,0,0,1,2];
+    pattern.forEach((d, k) => setTimeout(() => playDrum(d), k * 110));
+    setTimeout(() => clearPlaying(i), pattern.length * 110 + 200);
+    return;
+  }
+  let t = ctx.currentTime + 0.05;
+  riff.notes.forEach((freq, k) => {
+    const swingOffset = (riff.swing && k % 2 === 1) ? riff.dur * 0.16 : 0;
+    playTone(freq, t + swingOffset, riff.dur, riff.type, 0.32, riff.filtered);
+    t += riff.dur;
+  });
+  setTimeout(() => clearPlaying(i), riff.notes.length * riff.dur * 1000 + 300);
+}
+function clearPlaying(i) {
+  const cards = document.querySelectorAll('.member-card');
+  if (cards[i]) cards[i].classList.remove('playing');
+}
+
+// ═══════ DRUM SOUNDS ═══════
+function playDrum(type) {
+  const ctx = getCtx();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume();
+  const now = ctx.currentTime + 0.005;
+  if (type === 0) { // KICK
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.connect(gain); gain.connect(masterGain);
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.exponentialRampToValueAtTime(45, now + 0.13);
+    gain.gain.setValueAtTime(1.0, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.33);
+    osc.start(now); osc.stop(now + 0.33);
+  } else if (type === 1) { // SNARE
+    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.18, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.exp(-i/(ctx.sampleRate*0.025));
+    const src = ctx.createBufferSource(), ng = ctx.createGain();
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1400;
+    src.buffer = buf; src.connect(hp); hp.connect(ng); ng.connect(masterGain);
+    ng.gain.setValueAtTime(0.5, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    src.start(now);
+    const tone = ctx.createOscillator(), tg = ctx.createGain();
+    tone.type = 'triangle'; tone.frequency.setValueAtTime(190, now);
+    tone.connect(tg); tg.connect(masterGain);
+    tg.gain.setValueAtTime(0.3, now);
+    tg.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    tone.start(now); tone.stop(now + 0.1);
+  } else { // HI-HAT
+    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.04, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.exp(-i/(ctx.sampleRate*0.004));
+    const src = ctx.createBufferSource(), hg = ctx.createGain();
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000;
+    src.buffer = buf; src.connect(hp); hp.connect(hg); hg.connect(masterGain);
+    hg.gain.setValueAtTime(0.22, now); src.start(now);
+  }
+}
+
+function playBassNote() {
+  const ctx = getCtx(); if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume();
+  const now = ctx.currentTime + 0.005;
+  const osc = ctx.createOscillator(), gain = ctx.createGain();
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(1600, now);
+  filter.frequency.exponentialRampToValueAtTime(220, now + 0.22);
+  filter.Q.value = 6;
+  osc.connect(filter); filter.connect(gain); gain.connect(masterGain);
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(82, now);
+  gain.gain.setValueAtTime(0.001, now);
+  gain.gain.linearRampToValueAtTime(0.55, now + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+  osc.start(now); osc.stop(now + 0.26);
+}
+
+// ═══════ BEAT MACHINE ═══════
+const beatRows = [
+  { label: 'KICK',  sound: 0 },
+  { label: 'SNARE', sound: 1 },
+  { label: 'HIHAT', sound: 2 },
+  { label: 'BASS',  sound: 3 },
+];
+const presets = {
+  funk: [
+    [1,0,0,0, 0,0,1,0, 0,0,1,0, 0,0,0,0],
+    [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,1],
+    [1,0,1,1, 1,0,1,0, 1,0,1,1, 1,0,1,0],
+    [1,0,0,1, 0,1,0,0, 1,0,0,1, 0,1,0,0],
+  ],
+  soul: [
+    [1,0,0,0, 0,0,0,0, 1,0,0,1, 0,0,0,0],
+    [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+    [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+    [1,0,0,0, 1,0,1,0, 0,0,1,0, 1,0,0,0],
+  ],
+  clear: [
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  ],
+};
+let beatState = JSON.parse(JSON.stringify(presets.funk));
+let beatInterval = null, beatCol = 0;
+
+function renderBeatGrid() {
+  let html = '';
+  beatRows.forEach((row, ri) => {
+    html += `<div class="beat-label">${row.label}</div>`;
+    for (let ci = 0; ci < 16; ci++) {
+      html += `<button class="beat-btn ${beatState[ri][ci] ? 'active' : ''}" data-row="${ri}" data-col="${ci}"
+        onclick="toggleBeatBtn(${ri},${ci})" aria-label="${row.label} Schlag ${ci+1}"></button>`;
+    }
+  });
+  document.getElementById('beatGrid').innerHTML = html;
+}
+function toggleBeatBtn(r, c) {
+  beatState[r][c] = beatState[r][c] ? 0 : 1;
+  const btn = document.querySelector(`.beat-btn[data-row="${r}"][data-col="${c}"]`);
+  btn.classList.toggle('active');
+  if (beatState[r][c]) { getCtx(); playDrum(beatRows[r].sound === 3 ? 0 : beatRows[r].sound); }
+}
+function loadPreset(name) {
+  beatState = JSON.parse(JSON.stringify(presets[name]));
+  renderBeatGrid();
+  showToast(name === 'clear' ? 'Geleert' : 'Vorlage geladen 🥁');
+}
+function toggleBeat() {
+  const btn = document.getElementById('playBtn');
+  if (beatInterval) {
+    clearInterval(beatInterval); beatInterval = null;
+    btn.textContent = '▶ PLAY';
+    document.querySelectorAll('.beat-btn').forEach(b => b.classList.remove('playing'));
+    beatCol = 0;
+  } else {
+    unlockAudio();
+    const ctx = getCtx();
+    if (!ctx) { showToast('🔇 Audio wird vom Browser blockiert'); return; }
+    if (ctx.state === 'suspended') ctx.resume();
+    btn.textContent = '⏹ STOP';
+    beatCol = 0;
+    startBeat();
+  }
+}
+function startBeat() {
+  const bpm = parseInt(document.getElementById('bpm').value);
+  const interval = (60000 / bpm) / 4;
+  beatInterval = setInterval(stepBeat, interval);
+}
+function stepBeat() {
+  document.querySelectorAll('.beat-btn').forEach(b => b.classList.remove('playing'));
+  beatRows.forEach((row, ri) => {
+    const btn = document.querySelector(`.beat-btn[data-row="${ri}"][data-col="${beatCol}"]`);
+    if (btn) btn.classList.add('playing');
+    if (beatState[ri][beatCol]) {
+      if (row.sound === 3) { playBassNote(); } else { playDrum(row.sound); }
+    }
+  });
+  beatCol = (beatCol + 1) % 16;
+}
+document.getElementById('bpm').addEventListener('input', function() {
+  document.getElementById('bpmVal').textContent = this.value;
+  if (beatInterval) { clearInterval(beatInterval); startBeat(); }
+});
+
+function testStep1() {
+  addLog('--- Schritt 1: Audio init ---', 'info');
+  try {
+    unlockAudio();
+    var ctx = getCtx();
+    addLog((ctx ? '✅' : '🔴') + ' ctx = ' + (ctx ? 'erstellt' : 'NULL'), ctx ? 'ok' : 'err');
+    if (ctx) addLog('   state: ' + ctx.state, 'info');
+    addLog('   masterGain vorhanden: ' + (masterGain ? 'JA' : 'NEIN'), masterGain ? 'ok' : 'err');
+  } catch(e) {
+    addLog('🔴 EXCEPTION: ' + e.message, 'err');
+  }
+}
+function testStep2() {
+  addLog('--- Schritt 2: playDrum(0) KICK ---', 'info');
+  try {
+    playDrum(0);
+    addLog('✅ Durchgelaufen. Hast du den Kick gehört?', 'ok');
+  } catch(e) {
+    addLog('🔴 EXCEPTION: ' + e.message, 'err');
+  }
+}
+function testStep3() {
+  addLog('--- Schritt 3: playBassNote() ---', 'info');
+  try {
+    playBassNote();
+    addLog('✅ Durchgelaufen. Hast du den Bass gehört?', 'ok');
+  } catch(e) {
+    addLog('🔴 EXCEPTION: ' + e.message, 'err');
+  }
+}
+function testStep4() {
+  addLog('--- Schritt 4: Sequenz Kick-Snare-Hihat-Bass ---', 'info');
+  try {
+    unlockAudio();
+    var ctx = getCtx();
+    if (!ctx) { addLog('🔴 ctx ist null!', 'err'); return; }
+    if (ctx.state === 'suspended') ctx.resume();
+    addLog('ctx state: ' + ctx.state, 'info');
+    setTimeout(function(){ addLog('-> KICK'); playDrum(0); }, 0);
+    setTimeout(function(){ addLog('-> SNARE'); playDrum(1); }, 600);
+    setTimeout(function(){ addLog('-> HIHAT'); playDrum(2); }, 1200);
+    setTimeout(function(){ addLog('-> BASS'); playBassNote(); }, 1800);
+    setTimeout(function(){ addLog('✅ Sequenz fertig.', 'ok'); }, 2400);
+  } catch(e) {
+    addLog('🔴 EXCEPTION: ' + e.message, 'err');
+  }
+}
+</script>
+</body>
+</html>
